@@ -17,6 +17,7 @@ GOAL_LEFT = -100.0
 GOAL_RIGHT = 100.0
 CENTER_CIRCLE_R = 65.0
 PLAYER_RADIUS = 50.0
+PUCK_RADIUS = 20.0
 
 FIELD_W = RIGHT_WALL - LEFT_WALL
 FIELD_H = TOP_WALL - DOWN_WALL
@@ -24,9 +25,10 @@ FIELD_H = TOP_WALL - DOWN_WALL
 FIELDS_DIR = Path(__file__).resolve().parent.parent / "images" / "fields"
 NEON_VELOCITY_FIELD_FILE = "neon_velocity_field.png"
 
-# Области внутри мокапа 703×1024. Ширина игровой зоны — до табло, не включая его.
+# Области внутри мокапа 703×1024.
 NEON_MOCKUP_SIZE = (703, 1024)
-NEON_PLAY_NORM = (58 / 703, 58 / 1024, 517 / 703, 908 / 1024)
+# Координаты игры — вся площадь внутри cyan-борта (включая зону у табло и ворот).
+NEON_COORD_NORM = (58 / 703, 58 / 1024, 613 / 703, 908 / 1024)
 NEON_SCORE_NORM = (584 / 703, 58 / 1024, 82 / 703, 908 / 1024)
 
 NEON_THEME = {
@@ -66,6 +68,49 @@ def _norm_rect(dest: pygame.Rect, norm: tuple[float, float, float, float]) -> py
     )
 
 
+def _resolve_circle_rect(sx: float, sy: float, rad: float, rect: pygame.Rect) -> tuple[float, float]:
+    """Выталкивает круг из прямоугольника (обводка табло), если он заехал внутрь."""
+    if not rect.collidepoint(sx, sy):
+        nearest_x = max(rect.left, min(sx, rect.right))
+        nearest_y = max(rect.top, min(sy, rect.bottom))
+        dx = sx - nearest_x
+        dy = sy - nearest_y
+        if dx * dx + dy * dy >= rad * rad:
+            return sx, sy
+
+    # Ближайшая точка снаружи rect для центра круга.
+    if sx < rect.left:
+        sx = rect.left - rad
+    elif sx > rect.right:
+        sx = rect.right + rad
+    elif sy < rect.top:
+        sy = rect.top - rad
+    elif sy > rect.bottom:
+        sy = rect.bottom + rad
+    else:
+        # Центр внутри — выталкиваем в ближайшую сторону.
+        dist_left = sx - rect.left
+        dist_right = rect.right - sx
+        dist_top = sy - rect.top
+        dist_bottom = rect.bottom - sy
+        best = min(
+            (dist_left, "left"),
+            (dist_right, "right"),
+            (dist_top, "top"),
+            (dist_bottom, "bottom"),
+            key=lambda item: item[0],
+        )
+        if best[1] == "left":
+            sx = rect.left - rad
+        elif best[1] == "right":
+            sx = rect.right + rad
+        elif best[1] == "top":
+            sy = rect.top - rad
+        else:
+            sy = rect.bottom + rad
+    return sx, sy
+
+
 class FieldTransform:
     """Игровые координаты → пиксели. Игрок 1 (я) — снизу (отрицательный Y)."""
 
@@ -87,9 +132,29 @@ class FieldTransform:
         return gx, gy
 
     def clamp_player1(self, gx: float, gy: float) -> tuple[float, float]:
-        """Ограничения как на сервере для player1 (нижняя половина поля)."""
-        gx = max(LEFT_WALL + PLAYER_RADIUS, min(RIGHT_WALL - PLAYER_RADIUS, gx))
-        gy = max(DOWN_WALL + PLAYER_RADIUS, min(-PLAYER_RADIUS, gy))
+        """
+        Нижняя половина: бортики, центральная линия, обводка табло (не внутрь цифр).
+        Можно ходить у ворот, под табло и по всей своей половине.
+        """
+        r = PLAYER_RADIUS
+        gx = max(LEFT_WALL + r, min(RIGHT_WALL - r, gx))
+        gy = max(DOWN_WALL + r, min(-r, gy))
+
+        rad = self.radius_px(r)
+        rink = self.field_rect
+        sb = self.score_box_rect
+        sx, sy = self.to_screen(gx, gy)
+
+        # Бортики и центральная линия.
+        sx = max(rink.left + rad, min(rink.right - rad, sx))
+        sy = max(self.to_screen(0, -r)[1], min(rink.bottom - rad, sy))
+
+        # Обводка табло — нельзя заезжать на цифры, но можно под табло у правого борта.
+        sx, sy = _resolve_circle_rect(sx, sy, rad, sb)
+
+        gx, gy = self.to_game(sx, sy)
+        gx = max(LEFT_WALL + r, min(RIGHT_WALL - r, gx))
+        gy = max(DOWN_WALL + r, min(-r, gy))
         return gx, gy
 
     def radius_px(self, game_radius: float) -> int:
@@ -102,14 +167,28 @@ def draw_score_values(
     score_first: int,
     score_second: int,
 ) -> None:
-    """
-    Обновляет цифры в табло поверх мокапа.
-    score_first — мой счёт (низ), score_second — соперник (верх), как data.score на сервере.
+    """score_first — мой счёт (низ), score_second — соперник (верх)."""
+    cover = pygame.Surface((score_box_rect.w, score_box_rect.h), pygame.SRCALPHA)
+    cover.fill((0, 0, 0, 180))
+    surf.blit(cover, score_box_rect.topleft)
 
-    Пока не реализовано: на экране остаются 0:0 из мокапа.
-    Подключим, когда будет GameState с бэкенда — цифры в том же стиле и позиции.
-    """
-    _ = (surf, score_box_rect, score_first, score_second)
+    font = pygame.font.SysFont("arial", max(24, score_box_rect.w // 2), bold=True)
+    color = NEON_THEME["score_text"]
+
+    top_y = score_box_rect.top + score_box_rect.height // 4
+    bot_y = score_box_rect.top + 3 * score_box_rect.height // 4
+    cx = score_box_rect.centerx
+
+    for value, y in ((score_second, top_y), (score_first, bot_y)):
+        text = font.render(str(value), True, color)
+        surf.blit(text, (cx - text.get_width() // 2, y - text.get_height() // 2))
+
+
+def draw_puck(surf: pygame.Surface, tf: "FieldTransform", gx: float, gy: float) -> None:
+    center = tf.to_screen(gx, gy)
+    radius = tf.radius_px(PUCK_RADIUS)
+    pygame.draw.circle(surf, (80, 255, 120), center, radius)
+    pygame.draw.circle(surf, (200, 255, 220), center, max(1, radius // 3))
 
 
 def draw_game_field(
@@ -123,7 +202,7 @@ def draw_game_field(
     mockup = _load_neon_field_image()
     dest_rect = _fit_image_on_screen(surf, mockup)
 
-    play_rect = _norm_rect(dest_rect, NEON_PLAY_NORM)
+    play_rect = _norm_rect(dest_rect, NEON_COORD_NORM)
     score_rect = _norm_rect(dest_rect, NEON_SCORE_NORM)
     tf = FieldTransform(play_rect, score_rect)
 

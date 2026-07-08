@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pygame
 
-from game_field import DOWN_WALL, PLAYER_RADIUS, draw_game_field
+from game_field import DOWN_WALL, PLAYER_RADIUS, draw_game_field, draw_puck
+from network_client import GameClient
 
 pygame.init()
 pygame.font.init()
@@ -413,15 +414,26 @@ def _apply_circle_mask(surf):
     return circular
 
 
-def draw_field_stick(tf, gx, gy):
-    stick_index = state.selected_stick if state.selected_stick is not None else 0
+def draw_field_stick(tf, gx, gy, stick_index=None):
+    if stick_index is None:
+        stick_index = state.selected_stick if state.selected_stick is not None else 0
     surf = field_stick_surface(current_mode_name(), stick_index, tf)
     center = tf.to_screen(gx, gy)
     rect = surf.get_rect(center=center)
     screen.blit(surf, rect)
 
 
+def stop_game():
+    if state.game_client is not None:
+        state.game_client.stop()
+        state.game_client = None
+    state.screen = "splash"
+    state.field_transform = None
+    state.game_status = ""
+
+
 def start_game():
+    stop_game()
     state.screen = "game"
     state.show_menu = False
     state.show_sound = False
@@ -429,6 +441,9 @@ def start_game():
     state.show_stick = False
     state.field_transform = None
     state.player_stick_pos = (0.0, DOWN_WALL + PLAYER_RADIUS)
+    state.game_status = "Подключение к серверу..."
+    state.game_client = GameClient()
+    state.game_client.start()
 
 
 def update_player_stick_from_mouse(pos):
@@ -457,6 +472,8 @@ class State:
     play_flash_frames = 0
     field_transform = None
     player_stick_pos = (0.0, -250.0)
+    game_client = None
+    game_status = ""
 
 
 state = State()
@@ -532,15 +549,47 @@ def update_volume_from_x(x):
     state.volume = max(0.0, min(1.0, t))
 
 
+def draw_game_screen():
+    live = state.game_client.latest_state if state.game_client else None
+    live_score = live.score if live else None
+
+    tf = draw_game_field(screen, (W, H), live_score=live_score)
+    state.field_transform = tf
+
+    update_player_stick_from_mouse(pygame.mouse.get_pos())
+    if state.game_client is not None:
+        state.game_client.set_position(state.player_stick_pos[0], state.player_stick_pos[1])
+        for msg in state.game_client.pop_messages():
+            state.game_status = msg
+        if state.game_client.status:
+            state.game_status = state.game_client.status
+
+    my_stick = state.selected_stick if state.selected_stick is not None else 0
+    opp_stick = 1 if my_stick == 0 else 0
+
+    if live is not None:
+        draw_field_stick(tf, live.player1[0], live.player1[1], stick_index=my_stick)
+        draw_field_stick(tf, live.player2[0], live.player2[1], stick_index=opp_stick)
+        draw_puck(screen, tf, live.puck[0], live.puck[1])
+    else:
+        draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1], stick_index=my_stick)
+
+    if state.game_status:
+        status = FONT_SMALL.render(state.game_status, True, (180, 220, 255))
+        screen.blit(status, (18, 12))
+
+    hint = FONT_SMALL.render(
+        "ESC — меню  |  мышь — стик  |  нужен сервер + 2 окна для матча",
+        True,
+        (120, 120, 120),
+    )
+    screen.blit(hint, (18, H - 26))
+    pygame.display.flip()
+
+
 def draw():
     if state.screen == "game":
-        tf = draw_game_field(screen, (W, H))
-        state.field_transform = tf
-        update_player_stick_from_mouse(pygame.mouse.get_pos())
-        draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1])
-        hint = FONT_SMALL.render("ESC — назад  |  мышь — двигай стик", True, (120, 120, 120))
-        screen.blit(hint, (18, H - 26))
-        pygame.display.flip()
+        draw_game_screen()
         return
 
     screen.fill(BLACK)
@@ -582,7 +631,7 @@ while running:
             running = False
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             if state.screen == "game":
-                state.screen = "splash"
+                stop_game()
             else:
                 running = False
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -599,4 +648,6 @@ while running:
     clock.tick(60)
 
 pygame.quit()
+if state.game_client is not None:
+    state.game_client.stop()
 print("Окно закрыто.")
