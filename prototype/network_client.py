@@ -12,8 +12,8 @@ from dataclasses import dataclass
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws_connect"
-SEND_INTERVAL = 1.0 / 60.0
+DEFAULT_WS_URL = "wss://practice2026-qw8b.onrender.com/ws_connect"
+SEND_INTERVAL = 1.0 / 120.0
 
 
 @dataclass
