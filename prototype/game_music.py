@@ -48,6 +48,11 @@ class GameMusic:
             pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
 
     def stop(self) -> None:
-        if pygame.mixer.music.get_busy():
-            pygame.mixer.music.stop()
+        try:
+            # Проверяем, инициализирован ли микшер перед обращением к нему
+            if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+                pygame.mixer.music.stop()
+        except pygame.error:
+            # Игнорируем ошибку, если микшер уже выключен
+            pass
         self._current_mode = None
