@@ -2,16 +2,8 @@
 Aerohockey - интерактивный прототип Splash-экрана (реальное окно, кликабельно).
 Черновая версия для теста механики — до нормального движка это дублирует
 часть отрисовки из aerohockey_prototype.py, объединим при переходе на движок.
-
-Управление:
-  - клик по Menu  -> открыть/закрыть список режимов
-  - клик по карточке режима -> выбрать (radio, один активный)
-  - клик по Sound -> открыть/закрыть слайдер громкости, тащи кружок мышкой
-  - клик по Play  -> overlay выбора счёта (2 карточки)
-  - клик по карточке счёта -> выбрать счёт, затем overlay стиков снизу (2 варианта)
-  - клик по стику -> выбрать (выбранный крупнее и подсвечен)
-  - ESC / закрытие окна -> выход
 """
+import math
 from pathlib import Path
 
 import pygame
@@ -45,8 +37,9 @@ TEXT = (230, 230, 230)
 
 FONT = pygame.font.SysFont("arial", 18)
 FONT_SMALL = pygame.font.SysFont("arial", 14)
+FONT_PING = pygame.font.SysFont("arial", 20, bold=True)
 GAME_HINT_SURF = FONT_SMALL.render(
-    "ESC — меню  |  мышь — стик  |  нужен сервер + 2 окна для матча",
+    "ESC — меню  |  нужен сервер + 2 окна для матча",
     True,
     (120, 120, 120),
 )
@@ -80,7 +73,6 @@ STICK_NORMALIZED_SIZE = 256
 STICK_DISPLAY_DIAMETER = 104
 STICK_DISPLAY_DIAMETER_SELECTED = 152
 
-# Готовые PNG стиков (images/sticks/), порядок: стик 1 / стик 2 для режима.
 STICK_DEFS = {
     "Cosmic Rink": [
         "cosmic_rink_earth.png",
@@ -336,7 +328,6 @@ def is_first_to_five_mode() -> bool:
 
 
 def should_show_match_result() -> bool:
-    """Стикеры победы/поражения — только в режиме First To Five."""
     idx = state.selected_score
     if idx is None:
         return False
@@ -366,7 +357,6 @@ def trim_stick_image(surf):
 
 
 def normalize_stick_source(surf):
-    """Обрезает пустые поля и приводит все стики к одному квадратному размеру."""
     trimmed = trim_stick_image(surf)
     tw, th = trimmed.get_size()
     scale = STICK_NORMALIZED_SIZE / max(tw, th)
@@ -462,7 +452,6 @@ def field_stick_surface(mode_name, stick_index, tf):
 
 
 def _apply_circle_mask(surf):
-    """Обрезает спрайт по кругу — стик на поле выглядит круглым."""
     size = surf.get_width()
     mask = pygame.Surface((size, size), pygame.SRCALPHA)
     pygame.draw.circle(mask, (255, 255, 255, 255), (size // 2, size // 2), size // 2)
@@ -501,20 +490,27 @@ def start_game():
     state.field_transform = None
     state.player_stick_pos = (0.0, DOWN_WALL + PLAYER_RADIUS)
     state.game_status = "Подключение к серверу..."
+    
+    # Сброс локальных параметров физики
+    state.is_dragging = False 
+    state.paddle_vx = 0.0
+    state.paddle_vy = 0.0
+    state._last_score = (0, 0)
+    state.match_finished = False
+
     mode = current_mode_name()
     state.field_transform = warm_game_assets((W, H), mode)
+    
+    # Задаем начальные локальные экранные координаты, чтобы не улететь в 0,0
+    sx, sy = state.field_transform.to_screen(0.0, DOWN_WALL + PLAYER_RADIUS)
+    state.local_paddle_x = float(sx)
+    state.local_paddle_y = float(sy)
+
     state.game_client = GameClient()
     state.game_client.start()
     game_effects.reset()
     game_effects.warm_up()
     game_music.play_mode(mode, state.volume)
-
-
-def update_player_stick_from_mouse(pos):
-    if state.field_transform is None:
-        return
-    gx, gy = state.field_transform.to_game(pos[0], pos[1])
-    state.player_stick_pos = state.field_transform.clamp_player1(gx, gy)
 
 
 def in_circle(pos, center, radius):
@@ -538,6 +534,15 @@ class State:
     player_stick_pos = (0.0, -250.0)
     game_client = None
     game_status = ""
+    _last_score = (0, 0)
+    match_finished = False
+
+    # Переменные для локальной инерции
+    is_dragging = False 
+    paddle_vx = 0.0
+    paddle_vy = 0.0
+    local_paddle_x = 0.0
+    local_paddle_y = 0.0
 
 
 state = State()
@@ -621,14 +626,22 @@ def draw_game_screen():
     msgs: list[str] = []
     state_steps: list = []
     persisted_score = None
+    ping = 0.0
+
     if client is not None:
-        connected, live, status, msgs, state_steps, persisted_score = client.snapshot()
+        connected, live, status, msgs, state_steps, persisted_score, ping = client.snapshot()
         if msgs:
             state.game_status = msgs[-1]
         if status:
             state.game_status = status
             if "max_score" in status.lower():
                 msgs = list(msgs) + [status]
+                
+        # 1. Если оппонент вышел или связь разорвана - немедленно выходим в меню
+        for msg in msgs:
+            if "disconnect" in msg.lower() or "остановлена" in msg.lower():
+                stop_game()
+                return
 
     if live is not None:
         live_score = live.score
@@ -652,23 +665,84 @@ def draw_game_screen():
     tf = draw_game_field(screen, (W, H), mode_name=mode, live_score=live_score)
     state.field_transform = tf
 
-    update_player_stick_from_mouse(pygame.mouse.get_pos())
-    if client is not None:
-        client.set_position(state.player_stick_pos[0], state.player_stick_pos[1])
+    # === ЛОГИКА ФИЗИКИ С ИНЕРЦИЕЙ И СБРОСОМ ===
+    if live is not None:
+        # Сброс при голе
+        if state._last_score != live.score:
+            state.is_dragging = False
+            state.paddle_vx = 0.0
+            state.paddle_vy = 0.0
+            
+            # Жестко синхронизируем нашу локальную позицию с серверной
+            sx, sy = state.field_transform.to_screen(live.player1[0], live.player1[1])
+            state.local_paddle_x = float(sx)
+            state.local_paddle_y = float(sy)
+            
+        state._last_score = live.score
+
+    # Инерция (работает пока клиент подключен и поле готово)
+    if state.field_transform:
+        if state.is_dragging:
+            mx, my = pygame.mouse.get_pos()
+            dx = mx - state.local_paddle_x
+            dy = my - state.local_paddle_y
+            dist = math.hypot(dx, dy)
+            
+            MAX_SPEED = 25.0
+            if dist > MAX_SPEED:
+                dx = (dx / dist) * MAX_SPEED
+                dy = (dy / dist) * MAX_SPEED
+                
+            state.paddle_vx = dx
+            state.paddle_vy = dy
+            state.local_paddle_x += dx
+            state.local_paddle_y += dy
+        else:
+            # Игрок отпустил мышь — бита скользит по инерции и замедляется
+            state.local_paddle_x += state.paddle_vx
+            state.local_paddle_y += state.paddle_vy
+            state.paddle_vx *= 0.92
+            state.paddle_vy *= 0.92
+            
+            if abs(state.paddle_vx) < 0.1: state.paddle_vx = 0
+            if abs(state.paddle_vy) < 0.1: state.paddle_vy = 0
+
+        # Ограничиваем локальные координаты полем сервера
+        gx, gy = state.field_transform.to_game(state.local_paddle_x, state.local_paddle_y)
+        gx, gy = state.field_transform.clamp_player1(gx, gy)
+        
+        # Обновляем локальные экранные координаты обратно (чтобы бита не "залипала" за бортом)
+        sx, sy = state.field_transform.to_screen(gx, gy)
+        state.local_paddle_x = sx
+        state.local_paddle_y = sy
+        state.player_stick_pos = (gx, gy)
+
+        # Отправляем на сервер наши инерционные координаты
+        if client is not None:
+            client.set_position(gx, gy)
 
     my_stick = state.selected_stick if state.selected_stick is not None else 0
     opp_stick = 1 if my_stick == 0 else 0
 
+    # === ОТРИСОВКА СТРОГО ПО СЕРВЕРУ ===
     if live is not None:
-        draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1], stick_index=my_stick)
+        draw_field_stick(tf, live.player1[0], live.player1[1], stick_index=my_stick)
         draw_field_stick(tf, live.player2[0], live.player2[1], stick_index=opp_stick)
         draw_puck(screen, tf, live.puck[0], live.puck[1], mode_name=mode)
     else:
-        draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1], stick_index=my_stick)
+        draw_field_stick(tf, 0.0, -250.0, stick_index=my_stick)
         draw_puck(screen, tf, 0.0, 0.0, mode_name=mode)
 
     game_effects.draw_goal_flash(screen, tf, mode_name=mode)
     game_effects.draw_result_overlay(screen, tf)
+    
+    # Логика отключения после окончания игры
+    if game_effects.result_kind is not None:
+        state.match_finished = True
+        
+    if state.match_finished and game_effects.result_kind is None:
+        stop_game()
+        return
 
     if state.game_status:
         status_surf = _status_surf_cache.get(state.game_status)
@@ -676,6 +750,12 @@ def draw_game_screen():
             status_surf = FONT_SMALL.render(state.game_status, True, (180, 220, 255))
             _status_surf_cache[state.game_status] = status_surf
         screen.blit(status_surf, (18, 12))
+
+    # === ОТРИСОВКА ПИНГА ===
+    if connected:
+        ping_color = (46, 204, 113) if ping < 80 else (241, 196, 15) if ping < 150 else (231, 76, 60)
+        ping_surf = FONT_PING.render(f"Ping: {int(ping)} ms", True, ping_color)
+        screen.blit(ping_surf, (W - ping_surf.get_width() - 20, 12))
 
     screen.blit(GAME_HINT_SURF, (18, H - 26))
     pygame.display.flip()
@@ -730,17 +810,39 @@ while running:
             else:
                 running = False
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            handle_click(event.pos)
+            if state.screen == "game" and state.field_transform:
+                # Берем координаты биты с сервера, чтобы игрок мог захватить ее
+                # ровно там, где он ее видит на экране
+                px, py = state.player_stick_pos
+                if state.game_client and state.game_client.latest_state:
+                    px, py = state.game_client.latest_state.player1
+                    
+                sx, sy = state.field_transform.to_screen(px, py)
+                mx, my = event.pos
+                
+                # Если клик попал в радиус игрока, включаем режим захвата
+                if math.hypot(mx - sx, my - sy) <= state.field_transform.radius_px(PLAYER_RADIUS):
+                    state.is_dragging = True
+                    # При захвате синхронизируем нашу локальную биту с тем, что нарисовано
+                    state.local_paddle_x = float(sx)
+                    state.local_paddle_y = float(sy)
+                    state.paddle_vx = 0.0
+                    state.paddle_vy = 0.0
+            else:
+                handle_click(event.pos)
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             state.dragging_slider = False
-        elif event.type == pygame.MOUSEMOTION and state.dragging_slider:
-            update_volume_from_x(event.pos[0])
+            # Когда отпускаем мышь, бита перестает тянуться к курсору, но сохраняет инерцию
+            state.is_dragging = False 
+        elif event.type == pygame.MOUSEMOTION:
+            if state.dragging_slider:
+                update_volume_from_x(event.pos[0])
 
     if state.play_flash_frames > 0:
         state.play_flash_frames -= 1
 
     draw()
-    clock.tick(60)
+    clock.tick(120)
 
 pygame.quit()
 if state.game_client is not None:

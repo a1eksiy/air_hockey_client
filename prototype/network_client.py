@@ -7,13 +7,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import math
 from dataclasses import dataclass
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws_connect"
-SEND_INTERVAL = 1.0 / 60.0
+DEFAULT_WS_URL = "wss://practice2026-qw8b.onrender.com/ws_connect"
+SEND_INTERVAL = 1.0 / 120.0
 
 
 @dataclass
@@ -66,11 +67,13 @@ class GameClient:
         self._running = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._ws = None  # Ссылка на активный веб-сокет для принудительного закрытия
 
         self.connected = False
         self.latest_state: ClientGameState | None = None
         self.last_score: tuple[int, int] | None = None
         self.status = "Подключение..."
+        self.ping = 0.0
         self._pending_messages: list[str] = []
         self._state_queue: list[ClientGameState] = []
 
@@ -84,11 +87,22 @@ class GameClient:
     def stop(self) -> None:
         self._running = False
         loop = self._loop
+        ws = self._ws
+        
+        # Принудительно закрываем веб-сокет из главного потока
         if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(lambda: None)
+            if ws is not None:
+                try:
+                    asyncio.run_coroutine_threadsafe(ws.close(), loop)
+                except Exception:
+                    pass
+            else:
+                loop.call_soon_threadsafe(lambda: None)
+                
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+            
         with self._lock:
             self.connected = False
             self.latest_state = None
@@ -113,8 +127,8 @@ class GameClient:
         list[str],
         list[ClientGameState],
         tuple[int, int] | None,
+        float,
     ]:
-        """Один lock на кадр. Возвращает очередь GameState с прошлого кадра (~120/с с сервера)."""
         with self._lock:
             live = self.latest_state
             if live is not None:
@@ -134,7 +148,7 @@ class GameClient:
             self._state_queue.clear()
             msgs = self._pending_messages[:]
             self._pending_messages.clear()
-            return self.connected, live, self.status, msgs, states, self.last_score
+            return self.connected, live, self.status, msgs, states, self.last_score, self.ping
 
     def _thread_main(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -150,13 +164,16 @@ class GameClient:
             try:
                 async with websockets.connect(
                     self.url,
+                    ping_interval=1.0,
                     open_timeout=5,
                     close_timeout=2,
                 ) as ws:
+                    self._ws = ws  # Сохраняем ссылку на сокет
                     with self._lock:
                         self.connected = True
                         self.latest_state = None
                         self.last_score = None
+                        self.ping = 0.0
                         self._state_queue.clear()
                         self.status = "Ждём второго игрока..."
                     send_task = asyncio.create_task(self._send_loop(ws))
@@ -164,8 +181,14 @@ class GameClient:
                         async for raw in ws:
                             if not self._running:
                                 break
+                            
+                            if hasattr(ws, 'latency') and not math.isnan(ws.latency):
+                                with self._lock:
+                                    self.ping = ws.latency * 1000
+                                    
                             self._handle_message(json.loads(raw))
                     finally:
+                        self._ws = None  # Очищаем ссылку при выходе
                         send_task.cancel()
                         try:
                             await send_task
@@ -177,24 +200,27 @@ class GameClient:
                 with self._lock:
                     self.connected = False
                     self.latest_state = None
-                    # last_score и очередь GameState не сбрасываем — финальный 5:X успеет обработаться.
-                    self.status = "Сервер занят (2 игрока). Перезапустите сервер или закройте лишние окна"
+                    self._pending_messages.append("disconnect")
+                    self.status = "Соединение разорвано"
             except OSError:
                 with self._lock:
                     self.connected = False
                     self.latest_state = None
                     self.last_score = None
                     self._state_queue.clear()
-                    self.status = "Сервер не запущен — см. терминал с uvicorn"
+                    self._pending_messages.append("disconnect")
+                    self.status = "Сервер не отвечает"
             except Exception as exc:
                 with self._lock:
                     self.connected = False
                     self.latest_state = None
                     self.last_score = None
                     self._state_queue.clear()
-                    self.status = f"Нет связи с сервером ({exc.__class__.__name__})"
+                    self._pending_messages.append("disconnect")
+                    self.status = "Сервер не отвечает"
             else:
                 continue
+            
             if self._running:
                 await asyncio.sleep(2.0)
 
