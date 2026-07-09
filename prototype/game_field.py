@@ -26,10 +26,11 @@ FIELD_H = TOP_WALL - DOWN_WALL
 FIELDS_DIR = Path(__file__).resolve().parent.parent / "images" / "fields"
 PUCKS_DIR = Path(__file__).resolve().parent.parent / "images" / "pucks"
 
-# Мокапы полей — общая геометрия игры (682×1024 эталон; Sprinkle 696×1024 — те же доли).
+# Мокапы полей — общая геометрия игры (682×1024 эталон)
 MOCKUP_SIZE = (682, 1024)
 PLAY_COORD_NORM = (56 / 682, 56 / 1024, 601 / 682, 916 / 1024)
 SCORE_PANEL_W_NORM = 83 / 682
+
 # X панели счёта подогнан под правый борт каждого мокапа (34px от борта до правого края цифр).
 SCORE_PANEL_X_NORMS: dict[str, float] = {
     "Neon Velocity": 540 / 682,
@@ -117,7 +118,6 @@ def get_theme(mode_name: str | None) -> FieldTheme:
 
 
 def reload_field_assets() -> None:
-    """Сброс кэша после замены assets в images/fields или images/pucks."""
     _field_image_cache.clear()
     _puck_image_cache.clear()
     _field_bg_cache.clear()
@@ -250,6 +250,8 @@ def _field_background(
     scaled = pygame.transform.smoothscale(mockup, (nw, nh))
     bg = pygame.Surface(screen_size)
     bg.fill((0, 0, 0))
+    
+    # Изображение ровно по центру окна
     dest_rect = scaled.get_rect(center=(sw // 2, sh // 2))
     bg.blit(scaled, dest_rect)
     _field_bg_cache[key] = (bg, dest_rect)
@@ -269,8 +271,12 @@ class FieldTransform:
         self.mockup_rect = mockup_rect if mockup_rect is not None else field_rect
         self.score_panel_rects = score_panel_rects
         self.scale = field_rect.width / FIELD_W
-        self.origin_x = field_rect.centerx
-        self.origin_y = field_rect.centery
+        
+        # === ИСПРАВЛЕНИЕ ===
+        # За 0,0 берем не кривую физическую зону (где справа табло),
+        # а ИДЕАЛЬНЫЙ геометрический центр фоновой картинки (mockup_rect).
+        self.origin_x = self.mockup_rect.centerx
+        self.origin_y = self.mockup_rect.centery
 
     def to_screen(self, gx: float, gy: float) -> tuple[int, int]:
         sx = self.origin_x + gx * self.scale
@@ -423,7 +429,6 @@ def warm_game_assets(
     screen_size: tuple[int, int],
     mode_name: str | None = None,
 ) -> FieldTransform:
-    """Прогрев кэша фона и шайбы при старте матча — меньше лагов в первые секунды."""
     _, tf, _ = get_field_scene(screen_size, mode_name)
     theme = get_theme(mode_name)
     _puck_surface(theme, tf.radius_px(PUCK_RADIUS))
