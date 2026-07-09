@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pygame
@@ -23,26 +24,44 @@ FIELD_W = RIGHT_WALL - LEFT_WALL
 FIELD_H = TOP_WALL - DOWN_WALL
 
 FIELDS_DIR = Path(__file__).resolve().parent.parent / "images" / "fields"
-NEON_VELOCITY_FIELD_FILE = "neon_velocity_field.png"
+PUCKS_DIR = Path(__file__).resolve().parent.parent / "images" / "pucks"
 
-# Области внутри мокапа 682×1024.
-NEON_MOCKUP_SIZE = (682, 1024)
-# Координаты игры — площадь внутри cyan-борта (те же отступы, что на старом мокапе).
-NEON_COORD_NORM = (56 / 682, 56 / 1024, 601 / 682, 916 / 1024)
-# Счётные панели — справа на поле (цифры рисуем поверх, без затемнения).
-NEON_SCORE_TOP_PANEL_NORM = (540 / 682, 80 / 1024, 83 / 682, 417 / 1024)
-NEON_SCORE_BOTTOM_PANEL_NORM = (540 / 682, 520 / 1024, 83 / 682, 429 / 1024)
+# Мокапы полей 682×1024 — одни координаты для Neon Velocity и Cosmic Rink.
+MOCKUP_SIZE = (682, 1024)
+PLAY_COORD_NORM = (56 / 682, 56 / 1024, 601 / 682, 916 / 1024)
+SCORE_TOP_PANEL_NORM = (540 / 682, 80 / 1024, 83 / 682, 417 / 1024)
+SCORE_BOTTOM_PANEL_NORM = (540 / 682, 520 / 1024, 83 / 682, 429 / 1024)
+SCORE_TEXT_COLOR = (47, 208, 255)
 
-NEON_THEME = {
-    "background": (0, 0, 0),
-    "score_text": (47, 208, 255),
+DEFAULT_MODE = "Neon Velocity"
+
+
+@dataclass(frozen=True)
+class FieldTheme:
+    field_file: str
+    puck_file: str
+    puck_visible_diam_frac: float
+
+
+FIELD_THEMES: dict[str, FieldTheme] = {
+    "Neon Velocity": FieldTheme(
+        field_file="neon_velocity_field.png",
+        puck_file="neon_velocity_puck.png",
+        puck_visible_diam_frac=451 / 1024,
+    ),
+    "Cosmic Rink": FieldTheme(
+        field_file="cosmic_rink_field.png",
+        puck_file="cosmic_rink_moon.png",
+        puck_visible_diam_frac=297 / 360,
+    ),
 }
 
-_neon_field_image: pygame.Surface | None = None
-_field_bg_cache: dict[tuple[int, int], tuple[pygame.Surface, pygame.Rect]] = {}
-_field_scene_cache: dict[tuple[int, int], tuple[pygame.Surface, "FieldTransform", tuple[pygame.Rect, pygame.Rect]]] = {}
-_score_overlay_cache: dict[tuple[int, int, int, int], pygame.Surface] = {}
-_puck_surface_cache: dict[int, pygame.Surface] = {}
+_field_image_cache: dict[str, pygame.Surface] = {}
+_puck_image_cache: dict[str, pygame.Surface] = {}
+_field_bg_cache: dict[tuple[str, int, int], tuple[pygame.Surface, pygame.Rect]] = {}
+_field_scene_cache: dict[tuple[str, int, int], tuple[pygame.Surface, "FieldTransform", tuple[pygame.Rect, pygame.Rect]]] = {}
+_score_overlay_cache: dict[tuple[str, int, int, int, int], pygame.Surface] = {}
+_puck_surface_cache: dict[tuple[str, int], pygame.Surface] = {}
 
 # 7-segment LED: a=верх, b=верх-право, c=низ-право, d=низ, e=низ-лево, f=верх-лево, g=середина.
 _SEVEN_SEGMENT_ON: dict[str, str] = {
@@ -59,38 +78,41 @@ _SEVEN_SEGMENT_ON: dict[str, str] = {
 }
 
 
+def get_theme(mode_name: str | None) -> FieldTheme:
+    if mode_name and mode_name in FIELD_THEMES:
+        return FIELD_THEMES[mode_name]
+    return FIELD_THEMES[DEFAULT_MODE]
+
+
 def reload_field_assets() -> None:
-    """Сброс кэша после замены images/fields/neon_velocity_field.png."""
-    global _neon_field_image
-    _neon_field_image = None
+    """Сброс кэша после замены assets в images/fields или images/pucks."""
+    _field_image_cache.clear()
+    _puck_image_cache.clear()
     _field_bg_cache.clear()
     _field_scene_cache.clear()
     _score_overlay_cache.clear()
+    _puck_surface_cache.clear()
 
 
-def _load_neon_field_image() -> pygame.Surface:
-    global _neon_field_image
-    if _neon_field_image is None:
-        _neon_field_image = pygame.image.load(str(FIELDS_DIR / NEON_VELOCITY_FIELD_FILE)).convert()
-    return _neon_field_image
+def _load_field_image(theme: FieldTheme) -> pygame.Surface:
+    cached = _field_image_cache.get(theme.field_file)
+    if cached is None:
+        cached = pygame.image.load(str(FIELDS_DIR / theme.field_file)).convert()
+        _field_image_cache[theme.field_file] = cached
+    return cached
 
 
-def _fit_image_on_screen(surf: pygame.Surface, image: pygame.Surface) -> pygame.Rect:
-    sw, sh = surf.get_size()
-    iw, ih = image.get_size()
-    scale = min(sw / iw, sh / ih)
-    nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
-    scaled = pygame.transform.smoothscale(image, (nw, nh))
-    rect = scaled.get_rect(center=(sw // 2, sh // 2))
-    surf.fill((0, 0, 0))
-    surf.blit(scaled, rect)
-    return rect
+def _load_puck_image(theme: FieldTheme) -> pygame.Surface:
+    cached = _puck_image_cache.get(theme.puck_file)
+    if cached is None:
+        cached = pygame.image.load(str(PUCKS_DIR / theme.puck_file)).convert_alpha()
+        _puck_image_cache[theme.puck_file] = cached
+    return cached
 
 
 def _score_panel_rects(dest: pygame.Rect) -> tuple[pygame.Rect, pygame.Rect]:
-    """Верхняя и нижняя счётные панели на мокапе (соперник / я)."""
-    top = _norm_rect(dest, NEON_SCORE_TOP_PANEL_NORM)
-    bottom = _norm_rect(dest, NEON_SCORE_BOTTOM_PANEL_NORM)
+    top = _norm_rect(dest, SCORE_TOP_PANEL_NORM)
+    bottom = _norm_rect(dest, SCORE_BOTTOM_PANEL_NORM)
     return top, bottom
 
 
@@ -154,8 +176,7 @@ def _draw_digital_number(
 
 
 def _draw_score_in_panel(surf: pygame.Surface, panel: pygame.Rect, value: int) -> None:
-    """LED-цифры по центру панели табло (без затемнения фона)."""
-    _draw_digital_number(surf, panel, value, NEON_THEME["score_text"])
+    _draw_digital_number(surf, panel, value, SCORE_TEXT_COLOR)
 
 
 def _norm_rect(dest: pygame.Rect, norm: tuple[float, float, float, float]) -> pygame.Rect:
@@ -168,12 +189,16 @@ def _norm_rect(dest: pygame.Rect, norm: tuple[float, float, float, float]) -> py
     )
 
 
-def _field_background(screen_size: tuple[int, int]) -> tuple[pygame.Surface, pygame.Rect]:
-    cached = _field_bg_cache.get(screen_size)
+def _field_background(
+    screen_size: tuple[int, int],
+    theme: FieldTheme,
+) -> tuple[pygame.Surface, pygame.Rect]:
+    key = (theme.field_file, screen_size[0], screen_size[1])
+    cached = _field_bg_cache.get(key)
     if cached is not None:
         return cached
 
-    mockup = _load_neon_field_image()
+    mockup = _load_field_image(theme)
     sw, sh = screen_size
     iw, ih = mockup.get_size()
     scale = min(sw / iw, sh / ih)
@@ -183,7 +208,7 @@ def _field_background(screen_size: tuple[int, int]) -> tuple[pygame.Surface, pyg
     bg.fill((0, 0, 0))
     dest_rect = scaled.get_rect(center=(sw // 2, sh // 2))
     bg.blit(scaled, dest_rect)
-    _field_bg_cache[screen_size] = (bg, dest_rect)
+    _field_bg_cache[key] = (bg, dest_rect)
     return bg, dest_rect
 
 
@@ -238,7 +263,6 @@ def draw_score_values(
     score_first: int,
     score_second: int,
 ) -> None:
-    """score_first — мой счёт (низ), score_second — соперник (верх)."""
     top_panel, bottom_panel = score_panel_rects
     _draw_score_in_panel(surf, top_panel, score_second)
     _draw_score_in_panel(surf, bottom_panel, score_first)
@@ -246,27 +270,31 @@ def draw_score_values(
 
 def get_field_scene(
     screen_size: tuple[int, int],
+    mode_name: str | None = None,
 ) -> tuple[pygame.Surface, FieldTransform, tuple[pygame.Rect, pygame.Rect]]:
-    """Кэш фона и FieldTransform — не пересчитываем каждый кадр."""
-    cached = _field_scene_cache.get(screen_size)
+    theme = get_theme(mode_name)
+    key = (theme.field_file, screen_size[0], screen_size[1])
+    cached = _field_scene_cache.get(key)
     if cached is not None:
         return cached
 
-    bg, dest_rect = _field_background(screen_size)
-    play_rect = _norm_rect(dest_rect, NEON_COORD_NORM)
+    bg, dest_rect = _field_background(screen_size, theme)
+    play_rect = _norm_rect(dest_rect, PLAY_COORD_NORM)
     score_panel_rects = _score_panel_rects(dest_rect)
     tf = FieldTransform(play_rect, score_panel_rects)
     scene = (bg, tf, score_panel_rects)
-    _field_scene_cache[screen_size] = scene
+    _field_scene_cache[key] = scene
     return scene
 
 
 def _score_overlay(
+    mode_name: str | None,
     screen_size: tuple[int, int],
     score_panel_rects: tuple[pygame.Rect, pygame.Rect],
     live_score: tuple[int, int],
 ) -> pygame.Surface:
-    key = (screen_size[0], screen_size[1], live_score[0], live_score[1])
+    theme = get_theme(mode_name)
+    key = (theme.field_file, screen_size[0], screen_size[1], live_score[0], live_score[1])
     overlay = _score_overlay_cache.get(key)
     if overlay is None:
         overlay = pygame.Surface(screen_size, pygame.SRCALPHA)
@@ -275,16 +303,39 @@ def _score_overlay(
     return overlay
 
 
-def draw_puck(surf: pygame.Surface, tf: "FieldTransform", gx: float, gy: float) -> None:
+def _apply_circle_mask(surf: pygame.Surface) -> pygame.Surface:
+    size = surf.get_width()
+    mask = pygame.Surface((size, size), pygame.SRCALPHA)
+    pygame.draw.circle(mask, (255, 255, 255, 255), (size // 2, size // 2), size // 2)
+    circular = surf.copy().convert_alpha()
+    circular.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    return circular
+
+
+def _puck_surface(theme: FieldTheme, radius: int) -> pygame.Surface:
+    key = (theme.puck_file, radius)
+    cached = _puck_surface_cache.get(key)
+    if cached is not None:
+        return cached
+
+    source = _load_puck_image(theme)
+    diameter = max(4, int(round(2 * radius / theme.puck_visible_diam_frac)))
+    scaled = pygame.transform.scale(source, (diameter, diameter))
+    cached = _apply_circle_mask(scaled)
+    _puck_surface_cache[key] = cached
+    return cached
+
+
+def draw_puck(
+    surf: pygame.Surface,
+    tf: FieldTransform,
+    gx: float,
+    gy: float,
+    mode_name: str | None = None,
+) -> None:
+    theme = get_theme(mode_name)
     radius = tf.radius_px(PUCK_RADIUS)
-    puck_surf = _puck_surface_cache.get(radius)
-    if puck_surf is None:
-        size = radius * 2 + 2
-        puck_surf = pygame.Surface((size, size), pygame.SRCALPHA)
-        center = (size // 2, size // 2)
-        pygame.draw.circle(puck_surf, (80, 255, 120), center, radius)
-        pygame.draw.circle(puck_surf, (200, 255, 220), center, max(1, radius // 3))
-        _puck_surface_cache[radius] = puck_surf
+    puck_surf = _puck_surface(theme, radius)
     center = tf.to_screen(gx, gy)
     surf.blit(puck_surf, puck_surf.get_rect(center=center))
 
@@ -292,12 +343,11 @@ def draw_puck(surf: pygame.Surface, tf: "FieldTransform", gx: float, gy: float) 
 def draw_game_field(
     surf: pygame.Surface,
     screen_size: tuple[int, int],
-    theme: dict | None = None,
+    mode_name: str | None = None,
     live_score: tuple[int, int] | None = None,
 ):
-    """Neon Velocity — фон и табло строго из мокапа."""
-    bg, tf, score_panel_rects = get_field_scene(screen_size)
+    bg, tf, score_panel_rects = get_field_scene(screen_size, mode_name)
     surf.blit(bg, (0, 0))
     if live_score is not None:
-        surf.blit(_score_overlay(screen_size, score_panel_rects, live_score), (0, 0))
+        surf.blit(_score_overlay(mode_name, screen_size, score_panel_rects, live_score), (0, 0))
     return tf

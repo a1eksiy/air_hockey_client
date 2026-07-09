@@ -452,7 +452,8 @@ def start_game():
     state.field_transform = None
     state.player_stick_pos = (0.0, DOWN_WALL + PLAYER_RADIUS)
     state.game_status = "Подключение к серверу..."
-    _, state.field_transform, _ = get_field_scene((W, H))
+    mode = current_mode_name()
+    _, state.field_transform, _ = get_field_scene((W, H), mode)
     state.game_client = GameClient()
     state.game_client.start()
 
@@ -578,7 +579,8 @@ def draw_game_screen():
     else:
         live_score = None
 
-    tf = draw_game_field(screen, (W, H), live_score=live_score)
+    mode = current_mode_name()
+    tf = draw_game_field(screen, (W, H), mode_name=mode, live_score=live_score)
     state.field_transform = tf
 
     update_player_stick_from_mouse(pygame.mouse.get_pos())
@@ -591,10 +593,10 @@ def draw_game_screen():
     if live is not None:
         draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1], stick_index=my_stick)
         draw_field_stick(tf, live.player2[0], live.player2[1], stick_index=opp_stick)
-        draw_puck(screen, tf, live.puck[0], live.puck[1])
+        draw_puck(screen, tf, live.puck[0], live.puck[1], mode_name=mode)
     else:
         draw_field_stick(tf, state.player_stick_pos[0], state.player_stick_pos[1], stick_index=my_stick)
-        draw_puck(screen, tf, 0.0, 0.0)
+        draw_puck(screen, tf, 0.0, 0.0, mode_name=mode)
 
     if state.game_status:
         status_surf = _status_surf_cache.get(state.game_status)
